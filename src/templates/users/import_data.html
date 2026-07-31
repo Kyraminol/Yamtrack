@@ -145,10 +145,10 @@
         </div>
 
         {# Simkl #}
-        <div class="bg-[#39404b] p-4 rounded-lg">
+        <div class="bg-[#39404b] p-4 rounded-lg flex flex-col">
           <div class="flex items-center mb-3">{% source_display "simkl" %}</div>
           <p class="text-sm text-gray-400 mb-3">Import TV shows, movies and anime</p>
-          <form method="post" action="{% url 'simkl_oauth' %}">
+          <form method="post" action="{% url 'simkl_oauth' %}" class="mt-auto">
             {% csrf_token %}
             <input type="hidden" name="frequency" x-model="importFrequency">
             <input type="hidden" name="time" x-model="importTime">
@@ -161,10 +161,10 @@
         </div>
 
         {# MyAnimeList #}
-        <div class="bg-[#39404b] p-4 rounded-lg">
+        <div class="bg-[#39404b] p-4 rounded-lg flex flex-col">
           <div class="flex items-center mb-3">{% source_display "myanimelist" %}</div>
           <p class="text-sm text-gray-400 mb-3">Import anime and manga</p>
-          <form class="flex items-center"
+          <form class="flex items-center mt-auto"
                 method="post"
                 action="{% url 'import_mal' %}">
             {% csrf_token %}
