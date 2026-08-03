@@ -1,5 +1,6 @@
 from django import forms
 from django.core.exceptions import ValidationError
+from django.core.validators import RegexValidator
 from django.db import models
 
 
@@ -18,12 +19,10 @@ class ImportMode(models.TextChoices):
     OVERWRITE = "overwrite", "Overwrite"
 
 
-class CalibreWebNextGenImportDataForm(forms.Form):
-    """Class for Calibre-Web-NextGen import form validation."""
+class BaseImportDataForm(forms.Form):
+    """Base class to derive import form validation."""
 
-    url = forms.URLField(assume_scheme="http")
     username = forms.CharField()
-    password = forms.CharField()
     frequency = forms.ChoiceField(choices=ImportFrequency)
     mode = forms.ChoiceField(choices=ImportMode)
     time = forms.TimeField(required=False)
@@ -43,3 +42,18 @@ class CalibreWebNextGenImportDataForm(forms.Form):
             )
 
         return self.cleaned_data
+
+
+class SteamImportDataForm(BaseImportDataForm):
+    """Class for Steam import form validation."""
+
+    username = None
+    steam_id = forms.CharField(validators=[RegexValidator(r"^[0-9]{17}$")])
+    achievements = forms.BooleanField(required=False)
+
+
+class CalibreWebNextGenImportDataForm(BaseImportDataForm):
+    """Class for Calibre-Web-NextGen import form validation."""
+
+    url = forms.URLField(assume_scheme="http")
+    password = forms.CharField()

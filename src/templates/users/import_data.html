@@ -303,12 +303,13 @@
         </div>
 
         {# HowLongToBeat #}
-        <div class="bg-[#39404b] p-4 rounded-lg">
+        <div class="bg-[#39404b] p-4 rounded-lg flex flex-col">
           <div class="flex items-center mb-3">{% source_display "hltb" %}</div>
           <p class="text-sm text-gray-400 mb-3"
              x-text="importFrequency === 'once' ? 'Import games' : 'File uploads are not available for periodic imports'">
           </p>
-          <form method="post"
+          <form class="mt-auto"
+                method="post"
                 action="{% url 'import_hltb' %}"
                 enctype="multipart/form-data">
             {% csrf_token %}
@@ -330,9 +331,20 @@
         </div>
 
         {# Steam #}
-        <div class="bg-[#39404b] p-4 rounded-lg">
+        <div class="bg-[#39404b] p-4 rounded-lg" x-data="{ achievements: false }">
           <div class="flex items-center mb-3">{% source_display "steam" %}</div>
           <p class="text-sm text-gray-400 mb-3">Import games from your Steam library</p>
+          <div class="mb-3">
+            <label class="flex items-center text-sm text-gray-300">
+              <input type="checkbox"
+                     x-model="achievements"
+                     class="mr-2 rounded bg-[#2a2f35] border-gray-600 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-0">
+              <span class="flex flex-col">
+                <span class="text-sm">Import achievements status</span>
+                <span class="text-xs text-gray-400">(slower, one additional API call per game with progress)</span>
+              </span>
+            </label>
+          </div>
           <form class="flex items-center"
                 method="post"
                 action="{% url 'import_steam' %}">
@@ -340,9 +352,10 @@
             <input type="hidden" name="frequency" x-model="importFrequency">
             <input type="hidden" name="time" x-model="importTime">
             <input type="hidden" name="mode" x-model="importMode">
+            <input type="hidden" name="achievements" x-model="achievements">
             <div class="relative flex-1">
               <input placeholder="Steam 64-bit ID"
-                     name="user"
+                     name="steam_id"
                      class="w-full py-2 px-3 bg-[#2a2f35] rounded-l-md text-white text-sm border border-gray-600 focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
                      type="text">
               <div class="group absolute right-2 top-1/2 -translate-y-1/2">

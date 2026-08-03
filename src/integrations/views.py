@@ -19,7 +19,11 @@ from django.views.decorators.http import require_GET, require_POST
 import users
 from app import helpers as app_helpers
 from integrations import exports, tasks
-from integrations.forms import CalibreWebNextGenImportDataForm, ImportFrequency
+from integrations.forms import (
+    CalibreWebNextGenImportDataForm,
+    ImportFrequency,
+    SteamImportDataForm,
+)
 from integrations.imports import anilist, helpers, simkl, trakt
 from integrations.webhooks import emby, jellyfin, plex
 
@@ -418,19 +422,30 @@ def import_hltb(request):
 @require_POST
 def import_steam(request):
     """View for importing game data from Steam."""
-    steam_id = request.POST.get("user")
-    if not steam_id:
-        messages.error(request, "Steam ID is required.")
+    form = SteamImportDataForm(request.POST)
+
+    if not form.is_valid():
+        messages.error(
+            request,
+            f"Some fields are not valid: {', '.join(form.errors.keys())}",
+        )
         return redirect("import_data")
 
-    mode = request.POST["mode"]
-    frequency = request.POST["frequency"]
+    steam_id = form.cleaned_data["steam_id"]
+    frequency = form.cleaned_data["frequency"]
+    mode = form.cleaned_data["mode"]
+    achievements = form.cleaned_data["achievements"]
 
-    if frequency == "once":
-        tasks.import_steam.delay(username=steam_id, user_id=request.user.id, mode=mode)
+    if frequency == ImportFrequency.ONCE.value:
+        tasks.import_steam.delay(
+            username=steam_id,
+            user_id=request.user.id,
+            mode=mode,
+            achievements=achievements,
+        )
         messages.info(request, "The task to import media from Steam has been queued.")
     else:
-        import_time = request.POST["time"]
+        import_time = form.cleaned_data["time"].strftime("%H:%M")
         helpers.create_import_schedule(
             steam_id,
             request,
@@ -438,6 +453,9 @@ def import_steam(request):
             frequency,
             import_time,
             "Steam",
+            task_kwargs={
+                "achievements": achievements,
+            },
         )
     return redirect("import_data")
 

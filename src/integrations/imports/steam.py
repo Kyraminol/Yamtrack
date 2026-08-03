@@ -1,42 +1,97 @@
 import logging
-import time
+import re
 from collections import defaultdict
+from datetime import UTC, datetime
+from math import trunc
+from typing import NamedTuple
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 import app
 from app.models import MediaTypes, Sources, Status
 from app.providers import services
 from app.providers.igdb import ExternalGameSource, external_game
+from integrations.forms import ImportMode
 from integrations.imports import helpers
-from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
+from integrations.imports.helpers import MediaImportError
 
 logger = logging.getLogger(__name__)
 
+MIN_COMPLETED_PERCENTAGE = 100
+BASE_NOTE = "Imported from Steam"
+ACHIEVEMENTS_BASE_NOTE = (
+    "[Steam Importer] Achievements: {unlocked}/{total} ({percentage}%)"
+)
+ACHIEVEMENTS_NOTE_REGEX = re.compile(
+    rf"^{
+        re.sub(r'([\[\]()])', r'\\\1', ACHIEVEMENTS_BASE_NOTE).format(
+            unlocked=r'\d+', total=r'\d+', percentage=r'\d+(?:\.\d)?'
+        )
+    }$",
+    re.MULTILINE,
+)
+
 STEAM_API_BASE_URL = "https://api.steampowered.com"
+STEAM_OWNED_GAMES_URL = f"{STEAM_API_BASE_URL}/IPlayerService/GetOwnedGames/v0001/"
+STEAM_ACHIEVEMENTS_URL = (
+    f"{STEAM_API_BASE_URL}/ISteamUserStats/GetPlayerAchievements/v0001/"
+)
 
 
-def importer(steam_id, user, mode):
+def importer(steam_id, user, mode, *, achievements=False):
     """Import the user's games from Steam."""
-    steam_importer = SteamImporter(steam_id, user, mode)
+    steam_importer = SteamImporter(steam_id, user, mode, achievements=achievements)
     return steam_importer.import_data()
+
+
+class SteamAchievementsProgress(NamedTuple):
+    """Steam game achievement stats."""
+
+    unlocked: int = 0
+    total: int = 0
+    start_date: datetime | None = None
+    end_date: datetime | None = None
+
+    @property
+    def percentage(self) -> float | int:
+        """Return the achievement progress percentage."""
+        return (
+            trunc(self.unlocked * 100 / self.total * 10) / 10 if self.total > 0 else 0
+        )
+
+    @property
+    def is_completed(self) -> bool:
+        """Return whether the game is completed."""
+        return self.total > 0 and self.percentage >= MIN_COMPLETED_PERCENTAGE
+
+    @property
+    def note(self) -> str:
+        """Returns achievements note."""
+        if not self.unlocked or not self.total:
+            return ""
+        return ACHIEVEMENTS_BASE_NOTE.format(
+            unlocked=self.unlocked, total=self.total, percentage=self.percentage
+        )
 
 
 class SteamImporter:
     """Class to handle importing user game data from Steam."""
 
-    def __init__(self, steam_id, user, mode):
+    def __init__(self, steam_id, user, mode, *, achievements):
         """Initialize the importer with user details and mode.
 
         Args:
             steam_id (str): Steam user ID (64-bit SteamID) to import from
             user: Django user object to import data for
             mode (str): Import mode ("new" or "overwrite")
+            achievements (bool): Whether to import achievements
         """
         self.steam_id = steam_id
         self.user = user
         self.mode = mode
+        self.achievements = achievements
         self.warnings = []
         self.api_key = settings.STEAM_API_KEY
 
@@ -72,7 +127,15 @@ class SteamImporter:
         helpers.bulk_create_media(self.bulk_media, self.user)
         helpers.bulk_update_media(
             self.bulk_media_updates,
-            {MediaTypes.GAME.value: ["progress", "status"]},
+            {
+                MediaTypes.GAME.value: [
+                    "progress",
+                    "status",
+                    "start_date",
+                    "end_date",
+                    "notes",
+                ]
+            },
             self.user,
         )
 
@@ -91,8 +154,7 @@ class SteamImporter:
         return imported_counts, "\n".join(self.warnings) if self.warnings else ""
 
     def _get_owned_games(self):
-        """Fetch owned games from Steam API with retry logic for rate limiting."""
-        url = f"{STEAM_API_BASE_URL}/IPlayerService/GetOwnedGames/v0001/"
+        """Fetch owned games from Steam API."""
         params = {
             "key": self.api_key,
             "steamid": self.steam_id,
@@ -101,69 +163,53 @@ class SteamImporter:
             "format": "json",
         }
 
-        max_retries = 3
-        base_delay = 15
+        try:
+            response = services.api_request(
+                "STEAM", "GET", STEAM_OWNED_GAMES_URL, params=params
+            )
 
-        for attempt in range(max_retries):
-            try:
-                response = services.api_request("STEAM", "GET", url, params=params)
+            if "response" not in response:
+                msg = "Invalid response from Steam API"
+                raise MediaImportError(msg)
 
-                if "response" not in response:
-                    msg = "Invalid response from Steam API"
-                    raise MediaImportError(msg)
-
-                if "games" not in response["response"]:
-                    # User might have private profile or no games
-                    logger.warning(
-                        "No games found in Steam response for user %s",
-                        self.steam_id,
-                    )
-                    return []
-
-                games = response["response"]["games"]
-                logger.info(
-                    "Found %d games for Steam user %s",
-                    len(games),
+            if "games" not in response["response"]:
+                # User might have private profile or no games
+                logger.warning(
+                    "No games found in Steam response for user %s",
                     self.steam_id,
                 )
-                return games  # noqa: TRY300
+                return []
 
-            except requests.HTTPError as e:
-                if e.response.status_code == requests.codes.too_many_requests:
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (2**attempt)
-                        logger.warning(
-                            "Steam API rate limited (429). "
-                            "Retrying in %d seconds (attempt %d/%d)",
-                            delay,
-                            attempt + 1,
-                            max_retries,
-                        )
-                        time.sleep(delay)
-                        continue
-                    msg = "Steam API rate limit exceeded. Please try again later."
-                    raise MediaImportError(msg) from e
-                if e.response.status_code == requests.codes.forbidden:
-                    msg = "Steam profile is private or invalid"
-                    raise MediaImportError(msg) from e
-                if e.response.status_code == requests.codes.bad_request:
-                    msg = "Bad request to Steam API. Please check the Steam ID."
-                    raise MediaImportError(msg) from e
-                if e.response.status_code == requests.codes.unauthorized:
-                    msg = "Invalid Steam API key"
-                    raise MediaImportError(msg) from e
-                msg = f"Steam API error: {e.response.status_code}"
-                raise MediaImportError(msg) from e
+            games = response["response"]["games"]
+            logger.info(
+                "Found %d games for Steam user %s",
+                len(games),
+                self.steam_id,
+            )
+            return games  # noqa: TRY300
 
-        msg = "Steam API request failed after all retries"
-        raise MediaImportUnexpectedError(msg)
+        except requests.HTTPError as error:
+            if error.response.status_code == requests.codes.too_many_requests:
+                msg = "Steam API rate limit exceeded. Please try again later."
+                raise MediaImportError(msg) from error
+            if error.response.status_code == requests.codes.forbidden:
+                msg = "Steam profile is private or invalid"
+                raise MediaImportError(msg) from error
+            if error.response.status_code == requests.codes.bad_request:
+                msg = "Bad request to Steam API. Please check the Steam ID."
+                raise MediaImportError(msg) from error
+            if error.response.status_code == requests.codes.unauthorized:
+                msg = "Invalid Steam API key"
+                raise MediaImportError(msg) from error
+            msg = f"Steam API error: {error.response.status_code}"
+            raise MediaImportError(msg) from error
 
     def _process_game(self, game_data):
         """Process a single game from Steam API response."""
         appid = str(game_data["appid"])
         name = game_data.get("name", f"Unknown Game {appid}")
-        playtime_forever = game_data.get("playtime_forever", 0)  # in minutes
-        playtime_2weeks = game_data.get("playtime_2weeks", 0)  # in minutes
+        playtime_forever = game_data.get("playtime_forever") or 0  # in minutes
+        playtime_2weeks = game_data.get("playtime_2weeks") or 0  # in minutes
 
         try:
             # Try to match with IGDB
@@ -181,16 +227,19 @@ class SteamImporter:
                 )
                 return
 
+            achievements_progress = self._get_achievements_progress(game_data)
+
             media_id = str(igdb_game["media_id"])
             existing_game = self.existing_media[MediaTypes.GAME.value][
                 Sources.IGDB.value
             ].get(media_id)
 
-            if existing_game and self.mode == "overwrite":
+            if existing_game and self.mode == ImportMode.OVERWRITE.value:
                 self._queue_existing_game_update(
                     existing_game,
                     playtime_forever,
                     playtime_2weeks,
+                    achievements_progress,
                 )
                 return
 
@@ -215,8 +264,10 @@ class SteamImporter:
                 },
             )
 
-            # Determine status based on playtime
-            status = self._determine_game_status(playtime_forever, playtime_2weeks)
+            # Determine status based on playtime and achievements
+            status, start_date, end_date = self._determine_game_status(
+                playtime_forever, playtime_2weeks, achievements_progress
+            )
 
             # Create game object
             game = app.models.Game(
@@ -225,9 +276,9 @@ class SteamImporter:
                 status=status,
                 score=None,
                 progress=playtime_forever,
-                notes="Imported from Steam",
-                start_date=None,
-                end_date=None,
+                notes=achievements_progress.note or BASE_NOTE,
+                start_date=start_date,
+                end_date=end_date,
             )
 
             self.bulk_media[MediaTypes.GAME.value].append(game)
@@ -253,7 +304,74 @@ class SteamImporter:
             logger.warning("Failed to process Steam game %s (%s): %s", name, appid, e)
             self.warnings.append(f"{name} ({appid}): {e!s}")
 
-    def _queue_existing_game_update(self, game, playtime_forever, playtime_2weeks):
+    def _get_achievements_progress(self, game_data):
+        """Fetch game achievements from Steam API."""
+        appid = str(game_data.get("appid"))
+        playtime_forever = game_data.get("playtime_forever") or 0
+        has_community_visible_stats = game_data.get("has_community_visible_stats")
+
+        if (
+            not self.achievements
+            or playtime_forever < 1
+            or not has_community_visible_stats
+        ):
+            return SteamAchievementsProgress()
+
+        try:
+            params = {
+                "key": self.api_key,
+                "steamid": self.steam_id,
+                "appid": appid,
+                "format": "json",
+            }
+            response = services.api_request(
+                "STEAM", "GET", STEAM_ACHIEVEMENTS_URL, params=params
+            )
+            achievements = response.get("playerstats", {}).get("achievements") or []
+            unlocked_achievements = [
+                achievement.get("unlocktime")
+                for achievement in achievements
+                if achievement.get("achieved") == 1
+            ]
+
+            filtered_timestamps = sorted(ts for ts in unlocked_achievements if ts)
+            first_achievement_date = None
+            last_achievement_date = None
+            if len(filtered_timestamps) > 0:
+                first_achievement_date = self._parse_timestamp_utc(
+                    filtered_timestamps[0]
+                )
+                last_achievement_date = self._parse_timestamp_utc(
+                    filtered_timestamps[-1]
+                )
+
+            last_played = self._parse_timestamp_utc(game_data.get("rtime_last_played"))
+
+            return SteamAchievementsProgress(
+                len(unlocked_achievements),
+                len(achievements),
+                first_achievement_date,
+                last_achievement_date or last_played,
+            )
+
+        except requests.RequestException as error:
+            logger.debug(
+                "Error fetching achievements for game id %s: %s",
+                appid,
+                error,
+            )
+            return SteamAchievementsProgress()
+
+    @staticmethod
+    def _parse_timestamp_utc(timestamp):
+        """Parse Steam timestamp (UTC) into a datetime object."""
+        if not timestamp:
+            return None
+        return datetime.fromtimestamp(timestamp, tz=UTC)
+
+    def _queue_existing_game_update(
+        self, game, playtime_forever, playtime_2weeks, achievements_progress
+    ):
         """Queue updates for an existing game when Steam overwrite is used."""
         changed = False
 
@@ -261,48 +379,90 @@ class SteamImporter:
             game.progress = playtime_forever
             changed = True
 
-        new_status = self._determine_game_status(playtime_forever, playtime_2weeks)
-        if (
-            game.status
-            in [
-                Status.PLANNING.value,
-                Status.IN_PROGRESS.value,
-                Status.PAUSED.value,
-            ]
-            and game.status != new_status
-        ):
+        new_status, start_date, end_date = self._determine_game_status(
+            playtime_forever, playtime_2weeks, achievements_progress
+        )
+
+        prevent_status_regression = game.status in (
+            Status.COMPLETED.value,
+            Status.DROPPED.value,
+        ) and new_status in (
+            Status.PLANNING.value,
+            Status.IN_PROGRESS.value,
+            Status.PAUSED.value,
+        )
+
+        if game.status != new_status and not prevent_status_regression:
             game.status = new_status
+            changed = True
+
+        achievements_notes = achievements_progress.note
+        game_notes = game.notes or ""
+        if achievements_notes:
+            existing_achievements_notes = ACHIEVEMENTS_NOTE_REGEX.search(game_notes)
+            if existing_achievements_notes:
+                if achievements_notes not in game_notes:
+                    game.notes = ACHIEVEMENTS_NOTE_REGEX.sub(
+                        achievements_notes, game_notes
+                    )
+                    changed = True
+            else:
+                game.notes = (
+                    f"{game.notes}\n\n{achievements_notes}"
+                    if game.notes
+                    else achievements_notes
+                )
+                changed = True
+
+        if not game.start_date and start_date:
+            game.start_date = start_date
+            changed = True
+
+        if not game.end_date and end_date:
+            game.end_date = end_date
             changed = True
 
         if changed:
             self.bulk_media_updates[MediaTypes.GAME.value].append(game)
             logger.debug("Queued Steam update for existing game %s", game)
 
-    def _determine_game_status(self, playtime_forever, playtime_2weeks):
+    @staticmethod
+    def _determine_game_status(
+        playtime_forever, playtime_2weeks, achievements_progress
+    ):
         """Determine game status based on Steam playtime data.
 
         Args:
             playtime_forever (int): Total playtime in minutes
             playtime_2weeks (int): Playtime in last 2 weeks in minutes
+            achievements_progress (SteamAchievementsProgress)
 
         Returns:
-            str: Status value from Status choices
+            tuple: Status value from Status choices, start date, end date
         """
+        # Games above or equal MIN_COMPLETED_PERCENTAGE achievements are "Completed"
+        if achievements_progress.is_completed:
+            return (
+                Status.COMPLETED.value,
+                achievements_progress.start_date,
+                achievements_progress.end_date or timezone.now(),
+            )
+
         # Games with no playtime are considered "Planning"
         if playtime_forever == 0:
-            return Status.PLANNING.value
+            return Status.PLANNING.value, None, None
 
         # Games played in the last 2 weeks are "In Progress"
         if playtime_2weeks > 0:
-            return Status.IN_PROGRESS.value
+            return Status.IN_PROGRESS.value, achievements_progress.start_date, None
 
         # Games with total playtime but no recent activity are "On Hold"
-        return Status.PAUSED.value
+        return Status.PAUSED.value, achievements_progress.start_date, None
 
-    def _match_with_igdb(self, game_name, steam_appid):
+    @staticmethod
+    def _match_with_igdb(game_name, steam_appid):
         """Try to match Steam game with IGDB using External Game endpoint."""
         # Try to find IGDB game by Steam App ID using external_game endpoint
-
         igdb_game_id = external_game(steam_appid, ExternalGameSource.STEAM)
 
         if not igdb_game_id:
@@ -315,19 +475,6 @@ class SteamImporter:
             Sources.IGDB.value,
         )
 
-        logger.debug(
-            "Matched Steam game %s (appid: %s) with IGDB ID %s via external_game",
-            game_name,
-            steam_appid,
-            igdb_game_id,
-        )
-        return {
-            "media_id": igdb_game_id,
-            "source": Sources.IGDB.value,
-            "media_type": MediaTypes.GAME.value,
-            "title": game_details.get("title", game_name),
-            "image": game_details["image"],
-        }
         logger.debug(
             "Matched Steam game %s (appid: %s) with IGDB ID %s via external_game",
             game_name,

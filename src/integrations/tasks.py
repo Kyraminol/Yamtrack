@@ -143,9 +143,15 @@ def import_hltb(file, user_id, mode):
 
 
 @shared_task(name="Import from Steam")
-def import_steam(username, user_id, mode):
+def import_steam(username, user_id, mode, achievements=None):
     """Celery task for importing game data from Steam."""
-    return import_media(steam.importer, username, user_id, mode)
+    return import_media(
+        steam.importer,
+        username,
+        user_id,
+        mode,
+        achievements=achievements or False,
+    )
 
 
 @shared_task(name="Import from IMDB")
