@@ -7,7 +7,6 @@ from typing import NamedTuple
 
 import requests
 from django.conf import settings
-from django.utils import timezone
 
 import app
 from app.models import MediaTypes, Sources, Status
@@ -19,7 +18,6 @@ from integrations.imports.helpers import MediaImportError
 
 logger = logging.getLogger(__name__)
 
-MIN_COMPLETED_PERCENTAGE = 100
 BASE_NOTE = "Imported from Steam"
 ACHIEVEMENTS_BASE_NOTE = (
     "[Steam Importer] Achievements: {unlocked}/{total} ({percentage}%)"
@@ -52,7 +50,6 @@ class SteamAchievementsProgress(NamedTuple):
     unlocked: int = 0
     total: int = 0
     start_date: datetime | None = None
-    end_date: datetime | None = None
 
     @property
     def percentage(self) -> float | int:
@@ -60,11 +57,6 @@ class SteamAchievementsProgress(NamedTuple):
         return (
             trunc(self.unlocked * 100 / self.total * 10) / 10 if self.total > 0 else 0
         )
-
-    @property
-    def is_completed(self) -> bool:
-        """Return whether the game is completed."""
-        return self.total > 0 and self.percentage >= MIN_COMPLETED_PERCENTAGE
 
     @property
     def note(self) -> str:
@@ -132,7 +124,6 @@ class SteamImporter:
                     "progress",
                     "status",
                     "start_date",
-                    "end_date",
                     "notes",
                 ]
             },
@@ -265,7 +256,7 @@ class SteamImporter:
             )
 
             # Determine status based on playtime and achievements
-            status, start_date, end_date = self._determine_game_status(
+            status, start_date = self._determine_game_status(
                 playtime_forever, playtime_2weeks, achievements_progress
             )
 
@@ -278,7 +269,6 @@ class SteamImporter:
                 progress=playtime_forever,
                 notes=achievements_progress.note or BASE_NOTE,
                 start_date=start_date,
-                end_date=end_date,
             )
 
             self.bulk_media[MediaTypes.GAME.value].append(game)
@@ -336,22 +326,15 @@ class SteamImporter:
 
             filtered_timestamps = sorted(ts for ts in unlocked_achievements if ts)
             first_achievement_date = None
-            last_achievement_date = None
             if len(filtered_timestamps) > 0:
                 first_achievement_date = self._parse_timestamp_utc(
                     filtered_timestamps[0]
                 )
-                last_achievement_date = self._parse_timestamp_utc(
-                    filtered_timestamps[-1]
-                )
-
-            last_played = self._parse_timestamp_utc(game_data.get("rtime_last_played"))
 
             return SteamAchievementsProgress(
                 len(unlocked_achievements),
                 len(achievements),
                 first_achievement_date,
-                last_achievement_date or last_played,
             )
 
         except requests.RequestException as error:
@@ -379,7 +362,7 @@ class SteamImporter:
             game.progress = playtime_forever
             changed = True
 
-        new_status, start_date, end_date = self._determine_game_status(
+        new_status, start_date = self._determine_game_status(
             playtime_forever, playtime_2weeks, achievements_progress
         )
 
@@ -418,10 +401,6 @@ class SteamImporter:
             game.start_date = start_date
             changed = True
 
-        if not game.end_date and end_date:
-            game.end_date = end_date
-            changed = True
-
         if changed:
             self.bulk_media_updates[MediaTypes.GAME.value].append(game)
             logger.debug("Queued Steam update for existing game %s", game)
@@ -438,26 +417,18 @@ class SteamImporter:
             achievements_progress (SteamAchievementsProgress)
 
         Returns:
-            tuple: Status value from Status choices, start date, end date
+            tuple: Status value from Status choices, start date
         """
-        # Games above or equal MIN_COMPLETED_PERCENTAGE achievements are "Completed"
-        if achievements_progress.is_completed:
-            return (
-                Status.COMPLETED.value,
-                achievements_progress.start_date,
-                achievements_progress.end_date or timezone.now(),
-            )
-
         # Games with no playtime are considered "Planning"
         if playtime_forever == 0:
-            return Status.PLANNING.value, None, None
+            return Status.PLANNING.value, None
 
         # Games played in the last 2 weeks are "In Progress"
         if playtime_2weeks > 0:
-            return Status.IN_PROGRESS.value, achievements_progress.start_date, None
+            return Status.IN_PROGRESS.value, achievements_progress.start_date
 
         # Games with total playtime but no recent activity are "On Hold"
-        return Status.PAUSED.value, achievements_progress.start_date, None
+        return Status.PAUSED.value, achievements_progress.start_date
 
     @staticmethod
     def _match_with_igdb(game_name, steam_appid):

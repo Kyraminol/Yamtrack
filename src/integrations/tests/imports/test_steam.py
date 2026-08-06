@@ -60,7 +60,6 @@ class ImportSteam(TestCase):
                 "name": "Counter-Strike 2",
                 "playtime_forever": 1250,
                 "playtime_2weeks": 120,  # Recent activity
-                "rtime_last_played": 1704067200,
             },
             {
                 "appid": 570,
@@ -73,7 +72,6 @@ class ImportSteam(TestCase):
                 "name": "Team Fortress 2",
                 "playtime_forever": 500,
                 "playtime_2weeks": 0,  # No recent activity
-                "rtime_last_played": 1672531200,
             },
         )
         mock_external_game.side_effect = [1, 2, 3]
@@ -117,7 +115,7 @@ class ImportSteam(TestCase):
         mock_external_game,
         mock_api_request,
     ):
-        """Test full achievements complete a game while partial ones don't."""
+        """Test achievements populate notes and start date, not status."""
         mock_api_request.side_effect = [
             _owned_games(
                 {
@@ -125,7 +123,6 @@ class ImportSteam(TestCase):
                     "name": "Counter-Strike 2",
                     "playtime_forever": 1250,
                     "playtime_2weeks": 0,
-                    "rtime_last_played": 1704067200,
                     "has_community_visible_stats": 1,
                 },
                 {
@@ -133,7 +130,6 @@ class ImportSteam(TestCase):
                     "name": "Team Fortress 2",
                     "playtime_forever": 500,
                     "playtime_2weeks": 0,
-                    "rtime_last_played": 1704067200,
                     "has_community_visible_stats": 1,
                 },
             ),
@@ -151,14 +147,13 @@ class ImportSteam(TestCase):
 
         games = Game.objects.filter(user=self.user)
         cs2_game = games.get(item__title="Counter-Strike 2")
-        self.assertEqual(cs2_game.status, Status.COMPLETED.value)
+        self.assertEqual(cs2_game.status, Status.PAUSED.value)
         self.assertEqual(cs2_game.notes, "[Steam Importer] Achievements: 2/2 (100.0%)")
         self.assertEqual(
             cs2_game.start_date, datetime.fromtimestamp(1700000000, tz=UTC)
         )
-        self.assertEqual(cs2_game.end_date, datetime.fromtimestamp(1704067200, tz=UTC))
+        self.assertIsNone(cs2_game.end_date)
 
-        # partial progress keeps the playtime status and leaves the game open
         tf2_game = games.get(item__title="Team Fortress 2")
         self.assertEqual(tf2_game.status, Status.PAUSED.value)
         self.assertEqual(tf2_game.notes, "[Steam Importer] Achievements: 7/9 (77.7%)")
@@ -323,7 +318,6 @@ class ImportSteamOverwrite(TestCase):
             "name": "Counter-Strike 2",
             "playtime_forever": playtime,
             "playtime_2weeks": 120,
-            "rtime_last_played": 1704067200,
         }
         if has_stats:
             game["has_community_visible_stats"] = 1
@@ -371,13 +365,13 @@ class ImportSteamOverwrite(TestCase):
         self.assertEqual(game.progress, 1100)
         self.assertEqual(game.status, Status.COMPLETED.value)
 
-    def test_overwrite_appends_achievement_note_and_completes_dropped(
+    def test_overwrite_appends_achievement_note_without_regressing_dropped(
         self,
         mock_get_metadata,
         mock_external_game,
         mock_api_request,
     ):
-        """Test full achievements complete a dropped game and append the note."""
+        """Test achievements append the note but don't reopen a dropped game."""
         self._setup_mocks(
             mock_get_metadata,
             mock_external_game,
@@ -396,7 +390,7 @@ class ImportSteamOverwrite(TestCase):
         steam.importer(STEAM_ID, self.user, "overwrite", achievements=True)
 
         game.refresh_from_db()
-        self.assertEqual(game.status, Status.COMPLETED.value)
+        self.assertEqual(game.status, Status.DROPPED.value)
         self.assertEqual(
             game.notes,
             "Imported from Steam\n\n[Steam Importer] Achievements: 2/2 (100.0%)",
