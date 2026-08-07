@@ -19,16 +19,13 @@ from integrations.imports.helpers import MediaImportError
 logger = logging.getLogger(__name__)
 
 BASE_NOTE = "Imported from Steam"
-ACHIEVEMENTS_BASE_NOTE = (
-    "[Steam Importer] Achievements: {unlocked}/{total} ({percentage}%)"
+ACHIEVEMENTS_BASE_NOTE = "[Steam Importer]"
+ACHIEVEMENTS_NOTE = (
+    f"{ACHIEVEMENTS_BASE_NOTE} Achievements: {{unlocked}}/{{total}} ({{percentage}}%)"
 )
+ACHIEVEMENTS_NOTE_LAST_UNLOCK = " - last unlock {last_unlock}"
 ACHIEVEMENTS_NOTE_REGEX = re.compile(
-    rf"^{
-        re.sub(r'([\[\]()])', r'\\\1', ACHIEVEMENTS_BASE_NOTE).format(
-            unlocked=r'\d+', total=r'\d+', percentage=r'\d+(?:\.\d)?'
-        )
-    }$",
-    re.MULTILINE,
+    rf"^{re.escape(ACHIEVEMENTS_BASE_NOTE)}.*$", re.MULTILINE
 )
 
 STEAM_API_BASE_URL = "https://api.steampowered.com"
@@ -49,7 +46,8 @@ class SteamAchievementsProgress(NamedTuple):
 
     unlocked: int = 0
     total: int = 0
-    start_date: datetime | None = None
+    first_unlock: datetime | None = None
+    last_unlock: datetime | None = None
 
     @property
     def percentage(self) -> float | int:
@@ -63,9 +61,19 @@ class SteamAchievementsProgress(NamedTuple):
         """Returns achievements note."""
         if not self.unlocked or not self.total:
             return ""
-        return ACHIEVEMENTS_BASE_NOTE.format(
-            unlocked=self.unlocked, total=self.total, percentage=self.percentage
+        achievements_note = ACHIEVEMENTS_NOTE.format(
+            unlocked=self.unlocked,
+            total=self.total,
+            percentage=self.percentage,
         )
+        last_unlock_note = (
+            ACHIEVEMENTS_NOTE_LAST_UNLOCK.format(
+                last_unlock=self.last_unlock.strftime("%Y-%m-%d")
+            )
+            if self.total > 0 and self.last_unlock
+            else ""
+        )
+        return f"{achievements_note}{last_unlock_note}"
 
 
 class SteamImporter:
@@ -326,15 +334,20 @@ class SteamImporter:
 
             filtered_timestamps = sorted(ts for ts in unlocked_achievements if ts)
             first_achievement_date = None
+            last_achievement_date = None
             if len(filtered_timestamps) > 0:
                 first_achievement_date = self._parse_timestamp_utc(
                     filtered_timestamps[0]
+                )
+                last_achievement_date = self._parse_timestamp_utc(
+                    filtered_timestamps[-1]
                 )
 
             return SteamAchievementsProgress(
                 len(unlocked_achievements),
                 len(achievements),
                 first_achievement_date,
+                last_achievement_date,
             )
 
         except requests.RequestException as error:
@@ -350,7 +363,9 @@ class SteamImporter:
         """Parse Steam timestamp (UTC) into a datetime object."""
         if not timestamp:
             return None
-        return datetime.fromtimestamp(timestamp, tz=UTC)
+        return datetime.fromtimestamp(timestamp, tz=UTC).replace(
+            second=0, microsecond=0
+        )
 
     def _queue_existing_game_update(
         self, game, playtime_forever, playtime_2weeks, achievements_progress
@@ -425,10 +440,10 @@ class SteamImporter:
 
         # Games played in the last 2 weeks are "In Progress"
         if playtime_2weeks > 0:
-            return Status.IN_PROGRESS.value, achievements_progress.start_date
+            return Status.IN_PROGRESS.value, achievements_progress.first_unlock
 
         # Games with total playtime but no recent activity are "On Hold"
-        return Status.PAUSED.value, achievements_progress.start_date
+        return Status.PAUSED.value, achievements_progress.first_unlock
 
     @staticmethod
     def _match_with_igdb(game_name, steam_appid):

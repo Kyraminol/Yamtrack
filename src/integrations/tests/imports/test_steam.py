@@ -148,17 +148,23 @@ class ImportSteam(TestCase):
         games = Game.objects.filter(user=self.user)
         cs2_game = games.get(item__title="Counter-Strike 2")
         self.assertEqual(cs2_game.status, Status.PAUSED.value)
-        self.assertEqual(cs2_game.notes, "[Steam Importer] Achievements: 2/2 (100.0%)")
         self.assertEqual(
-            cs2_game.start_date, datetime.fromtimestamp(1700000000, tz=UTC)
+            cs2_game.notes,
+            "[Steam Importer] Achievements: 2/2 (100.0%) - last unlock 2024-01-01",
+        )
+        self.assertEqual(
+            cs2_game.start_date, datetime(2023, 11, 14, 22, 13, tzinfo=UTC)
         )
         self.assertIsNone(cs2_game.end_date)
 
         tf2_game = games.get(item__title="Team Fortress 2")
         self.assertEqual(tf2_game.status, Status.PAUSED.value)
-        self.assertEqual(tf2_game.notes, "[Steam Importer] Achievements: 7/9 (77.7%)")
         self.assertEqual(
-            tf2_game.start_date, datetime.fromtimestamp(1700000000, tz=UTC)
+            tf2_game.notes,
+            "[Steam Importer] Achievements: 7/9 (77.7%) - last unlock 2023-11-14",
+        )
+        self.assertEqual(
+            tf2_game.start_date, datetime(2023, 11, 14, 22, 13, tzinfo=UTC)
         )
         self.assertIsNone(tf2_game.end_date)
 
@@ -393,9 +399,10 @@ class ImportSteamOverwrite(TestCase):
         self.assertEqual(game.status, Status.DROPPED.value)
         self.assertEqual(
             game.notes,
-            "Imported from Steam\n\n[Steam Importer] Achievements: 2/2 (100.0%)",
+            "Imported from Steam\n\n"
+            "[Steam Importer] Achievements: 2/2 (100.0%) - last unlock 2024-01-01",
         )
-        self.assertEqual(game.start_date, datetime.fromtimestamp(1700000000, tz=UTC))
+        self.assertEqual(game.start_date, datetime(2023, 11, 14, 22, 13, tzinfo=UTC))
 
     def test_overwrite_refreshes_stale_achievement_note(
         self,
@@ -426,7 +433,8 @@ class ImportSteamOverwrite(TestCase):
         self.assertEqual(warnings, "")
         self.assertEqual(
             game.notes,
-            "Imported from Steam\n\n[Steam Importer] Achievements: 1/2 (50.0%)",
+            "Imported from Steam\n\n"
+            "[Steam Importer] Achievements: 1/2 (50.0%) - last unlock 2023-11-14",
         )
 
     def test_overwrite_updates_newest_game_instance(
